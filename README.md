@@ -130,6 +130,18 @@ uv build                         # wheel + sdist in dist/
 
 Dependencies are managed with `uv add` / `uv remove`. Commit `uv.lock`.
 
+### Releases
+
+Packages are built only from tags. Bump the version, commit, and push a matching `v` tag:
+
+```sh
+uv version --bump minor          # or patch / major; updates pyproject.toml and uv.lock
+git commit -am "Release $(uv version --short)"
+git tag "v$(uv version --short)" && git push origin main --tags
+```
+
+The [release workflow](.github/workflows/release.yml) runs the CI checks, fails if the tag doesn't match the version in `pyproject.toml`, builds the wheel and sdist, and attaches them to a GitHub release with generated notes. Other projects can then pin the tag (`...NinjaOneLibrary@v0.2.0`).
+
 ### Dependency updates
 
 [Dependabot](.github/dependabot.yml) checks the uv dependencies and GitHub Actions every Monday at 23:00 (Europe/Oslo). It opens one grouped PR for minor and patch updates and one for major updates. [CI](.github/workflows/ci.yml) runs lint, type checks and tests on Python 3.12 and 3.14 for every PR. Merging stays manual.
