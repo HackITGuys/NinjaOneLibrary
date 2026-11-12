@@ -1,0 +1,36 @@
+# Weekly dependency updates, Monday night, grouped into as few PRs as possible.
+# Security-alert PRs are enabled separately: Settings -> Code security -> Dependabot security updates.
+# Dependabot cannot update devenv.lock (Nix); run `devenv update` for that.
+version: 2
+
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "23:00"
+      timezone: Europe/Oslo
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: deps
+    groups:
+      python-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      python-major:
+        patterns: ["*"]
+        update-types: [major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "23:00"
+      timezone: Europe/Oslo
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
