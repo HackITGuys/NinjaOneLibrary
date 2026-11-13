@@ -34,6 +34,8 @@ from NinjaOne.models import (
     OsPatch,
     Role,
     ScanGroup,
+    SoftwareCatalogEntry,
+    SoftwareDevice,
     SoftwareInstall,
     SoftwarePatch,
     SoftwareProduct,
@@ -156,6 +158,27 @@ def brief_software_summaries(client: NinjaOneClient, summaries: Sequence[Softwar
     return rows
 
 
+def brief_software_catalog(client: NinjaOneClient, entries: Sequence[SoftwareCatalogEntry]) -> list[Row]:
+    return [
+        {"publisher": e.publisher, "name": e.name, "version": e.version, "devices": e.device_count}
+        for e in entries
+    ]
+
+
+def brief_software_devices(client: NinjaOneClient, rows: Sequence[SoftwareDevice]) -> list[Row]:
+    return [
+        {
+            "id": r.device_id,
+            "device": r.device_name,
+            "organization": r.organization_name or r.organization_id,
+            "publisher": r.publisher,
+            "name": r.name,
+            "version": r.version,
+        }
+        for r in rows
+    ]
+
+
 def brief_software_products(client: NinjaOneClient, products: Sequence[SoftwareProduct]) -> list[Row]:
     return [
         {
@@ -261,6 +284,8 @@ BRIEF: dict[type[BaseModel], Callable[[NinjaOneClient, Sequence[Any]], list[Row]
     Device: brief_devices,
     SoftwareInstall: brief_software,
     SoftwareSummary: brief_software_summaries,
+    SoftwareCatalogEntry: brief_software_catalog,
+    SoftwareDevice: brief_software_devices,
     SoftwareProduct: brief_software_products,
     OsPatch: brief_os_patches,
     SoftwarePatch: brief_software_patches,

@@ -7,9 +7,10 @@ from typing import Any
 import responses
 from click.testing import CliRunner
 
-from NinjaOne import NinjaOneClient
+from NinjaOne import NinjaOneClient, load_software_snapshot, save_software_snapshot, snapshot_path
 from NinjaOne.cli import State, main, split_ids
 from tests.conftest import get, get_query, raw_device
+from tests.test_snapshot import make_snapshot, register_inventory
 
 ORGS = [{"id": 1, "name": "Contoso"}, {"id": 2, "name": "Fabrikam"}]
 
@@ -184,3 +185,67 @@ def test_vulnerabilities_carry_device_names(client: NinjaOneClient, api: respons
     assert (entry["device_name"], entry["organization_name"]) == ("SRV-SQL01", "Contoso")
     lines, _ = brief_run(client, "vulnerabilities", "--brief")
     assert lines[1].split() == ["SRV-SQL01", "Contoso", "2", "0", "0", "0", "2"]
+
+
+def test_software_catalog_from_the_saved_snapshot(
+    client: NinjaOneClient, api: responses.RequestsMock
+) -> None:
+    save_software_snapshot(make_snapshot(), snapshot_path(client.settings))
+    lines, stderr = brief_run(client, "software-catalog", "--publisher", "igor pavlov", "--brief")
+    assert [line.split() for line in lines] == [
+        ["PUBLISHER", "NAME", "VERSION", "DEVICES"],
+        ["Igor", "Pavlov", "7-Zip", "23.01", "(x64)", "23.01", "3"],
+        ["Igor", "Pavlov", "7-Zip", "24.09", "(x64)", "24.09", "1"],
+    ]
+    assert "Software snapshot from" in stderr and "--refresh reads the inventory again" in stderr
+    assert not [call for call in api.calls if call.request.method == "GET"]  # answered offline
+
+
+def test_software_catalog_reads_the_inventory_once(
+    client: NinjaOneClient, api: responses.RequestsMock
+) -> None:
+    register_inventory(api)
+    result = CliRunner().invoke(
+        main, ["software-catalog", "--name", "7-Zip 24.09 (x64)"], obj=State(_client=client)
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == [
+        {"publisher": "Igor Pavlov", "name": "7-Zip 24.09 (x64)", "version": "24.09", "device_count": 1}
+    ]
+    assert "Reading the whole software inventory" in result.stderr
+    assert "Saved the snapshot: 6 installs of 4 distinct software on 3 devices." in result.stderr
+    assert load_software_snapshot(snapshot_path(client.settings)) is not None
+
+
+def test_software_devices(client: NinjaOneClient, api: responses.RequestsMock) -> None:
+    register_orgs(api)
+    save_software_snapshot(make_snapshot(), snapshot_path(client.settings))
+    args = [
+        "software-devices",
+        "--publisher",
+        "Igor Pavlov",
+        "--name",
+        "7-Zip 23.01 (x64)",
+        "--version",
+        "23.01",
+    ]
+    rows = run(client, *args, "--org", "Fabrikam")
+    assert [(r["device_id"], r["device_name"], r["organization_name"]) for r in rows] == [
+        (2, "WS-0042", "Fabrikam")
+    ]
+    lines, _ = brief_run(client, *args, "--brief")
+    assert lines[0].split() == ["ID", "DEVICE", "ORGANIZATION", "PUBLISHER", "NAME", "VERSION"]
+    assert len(lines) == 4
+
+    missing = CliRunner().invoke(main, ["software-devices", "--version", "1.0"], obj=State(_client=client))
+    assert missing.exit_code == 2 and "Give --publisher and/or --name" in missing.stderr
+
+
+def test_software_snapshot_status(client: NinjaOneClient, api: responses.RequestsMock) -> None:
+    none_yet = CliRunner().invoke(main, ["software-snapshot"], obj=State(_client=client))
+    assert none_yet.exit_code == 1 and "--refresh reads one" in none_yet.stderr
+
+    register_inventory(api)
+    status = run(client, "software-snapshot", "--refresh")
+    assert (status["installs"], status["software"], status["devices"], status["fresh"]) == (6, 4, 3, True)
+    assert status["path"] == str(snapshot_path(client.settings))

@@ -20,7 +20,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import UTC, date, timedelta
 from pathlib import Path
 from typing import Any, TextIO, TypeVar
 
@@ -32,7 +32,7 @@ from NinjaOne import views
 from NinjaOne.client import NinjaOneClient, NinjaOneError
 from NinjaOne.config import NinjaOneSettings
 from NinjaOne.devices import build_df, get_device, list_devices, list_roles, list_tags
-from NinjaOne.models import DEVICE_STATES
+from NinjaOne.models import DEVICE_STATES, SoftwareSnapshot
 from NinjaOne.organizations import find_organizations, list_locations, list_organizations
 from NinjaOne.security import (
     find_endpoints,
@@ -44,6 +44,15 @@ from NinjaOne.security import (
     software_patch_installs,
     software_patches,
     vulnerability_counts,
+)
+from NinjaOne.snapshot import (
+    load_fresh_software_snapshot,
+    load_software_snapshot,
+    refresh_software_snapshot,
+    snapshot_age,
+    snapshot_path,
+    software_catalog,
+    software_devices,
 )
 from NinjaOne.software import (
     device_software,
@@ -402,6 +411,7 @@ def device(state: State, device_id: int) -> None:
 @click.option("--version", help='Version: "<24.09", ">=2.4,<2.4.62", a glob like "24.*", or exact.')
 @click.option("--no-system", is_flag=True, help="Leave out system components.")
 @click.option("--summary", is_flag=True, help="One entry per product with device counts per version.")
+@click.option("--exact", is_flag=True, help="--vendor and --name must equal the whole value, not a part.")
 @df_option
 @brief_option
 @pass_state
@@ -414,10 +424,15 @@ def software(
     version: str | None,
     no_system: bool,
     summary: bool,
+    exact: bool,
     df: str | None,
     brief: bool,
 ) -> None:
-    """Search installed software by vendor, name and version.
+    """Search installed software by vendor, name and version, live.
+
+    The API can't filter software by name, so this reads every install in scope each
+    time. For repeated lookups, software-catalog and software-devices answer from a saved
+    snapshot instead.
 
     --brief: one row per product and version with its device count (with --summary: one
     row per product).
@@ -429,6 +444,7 @@ def software(
             name=name,
             version=version,
             include_system_components=not no_system,
+            exact=exact,
         )
     else:
         ids = org_ids(state, org)
@@ -441,8 +457,158 @@ def software(
             df=build_df(organization_ids=ids, df=df),
             # Device names make the full listing readable; summaries and brief rows don't show them.
             devices=None if summary or brief else list_devices(state.client, organization_id=ids, df=df),
+            exact=exact,
         )
     show(state, brief, summarise_software(installs) if summary else installs)
+
+
+# -- software snapshot ---------------------------------------------------------
+
+
+def _age(snapshot: SoftwareSnapshot) -> str:
+    minutes = int(snapshot_age(snapshot).total_seconds() // 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 120:
+        return f"{minutes} min ago"
+    hours = minutes // 60
+    return f"{hours} h ago" if hours < 48 else f"{hours // 24} days ago"
+
+
+def _taken(snapshot: SoftwareSnapshot) -> str:
+    return f"{snapshot.taken_at.astimezone(UTC):%Y-%m-%d %H:%M} UTC, {_age(snapshot)}"
+
+
+def load_snapshot(state: State, refresh: bool) -> SoftwareSnapshot:
+    """The saved snapshot while it is fresh, else a new one; says which on stderr."""
+    settings = state.client.settings
+    if not refresh:
+        cached = load_fresh_software_snapshot(settings)
+        if cached is not None:
+            click.echo(
+                f"Software snapshot from {_taken(cached)} ({cached.install_count:,} installs); "
+                "--refresh reads the inventory again.",
+                err=True,
+            )
+            return cached
+    click.echo(
+        "Reading the whole software inventory into a local snapshot; lookups reuse it for "
+        f"{settings.snapshot_max_age_hours:g} h...",
+        err=True,
+    )
+    snapshot = refresh_software_snapshot(state.client)
+    if state.progress is not None:
+        state.progress.clear()
+    click.echo(
+        f"Saved the snapshot: {snapshot.install_count:,} installs of {len(snapshot.software):,} "
+        f"distinct software on {len(snapshot.devices):,} devices.",
+        err=True,
+    )
+    return snapshot
+
+
+def match_options[G: Callable[..., Any]](f: G) -> G:
+    """--publisher/--name/--version for snapshot lookups: exact unless the value is a glob."""
+    f = click.option("--no-system", is_flag=True, help="Leave out system components.")(f)
+    f = click.option(
+        "--refresh", is_flag=True, help="Read the inventory again instead of using the saved snapshot."
+    )(f)
+    f = click.option("--version", help='Version: exact, a glob like "24.*", or a range like "<24.09".')(f)
+    f = click.option("--name", help='Software name, exactly (case-insensitive); a glob like "7-Zip*" too.')(f)
+    f = click.option(
+        "--publisher", "--vendor", "publisher", help="Publisher, exactly (case-insensitive); a glob too."
+    )(f)
+    return f
+
+
+@main.command("software-catalog")
+@org_option
+@match_options
+@brief_option
+@pass_state
+def software_catalog_command(
+    state: State,
+    org: str | None,
+    publisher: str | None,
+    name: str | None,
+    version: str | None,
+    refresh: bool,
+    no_system: bool,
+    brief: bool,
+) -> None:
+    """What software exists: each publisher, name and version, with its device count.
+
+    Answered from a local snapshot of the inventory, read once and reused until it is
+    NINJA_SNAPSHOT_MAX_AGE_HOURS old (default 24). Matching is exact, not by substring.
+    """
+    ids = org_ids(state, org)  # an unknown --org fails before the inventory is read
+    snapshot = load_snapshot(state, refresh)
+    entries = software_catalog(
+        snapshot,
+        publisher=publisher,
+        name=name,
+        version=version,
+        include_system_components=not no_system,
+        organization_ids=ids,
+    )
+    show(state, brief, entries)
+
+
+@main.command("software-devices")
+@org_option
+@match_options
+@brief_option
+@pass_state
+def software_devices_command(
+    state: State,
+    org: str | None,
+    publisher: str | None,
+    name: str | None,
+    version: str | None,
+    refresh: bool,
+    no_system: bool,
+    brief: bool,
+) -> None:
+    """Every device a software appears on, from the same snapshot as software-catalog."""
+    if not (publisher or name):
+        raise click.UsageError("Give --publisher and/or --name")
+    ids = org_ids(state, org)
+    snapshot = load_snapshot(state, refresh)
+    rows = software_devices(
+        snapshot,
+        publisher=publisher,
+        name=name,
+        version=version,
+        include_system_components=not no_system,
+        organization_ids=ids,
+    )
+    show(state, brief, rows)
+
+
+@main.command("software-snapshot")
+@click.option("--refresh", is_flag=True, help="Read the inventory again now (e.g. from a nightly job).")
+@pass_state
+def software_snapshot_command(state: State, refresh: bool) -> None:
+    """Where the software snapshot is, how old and how big it is."""
+    settings = state.client.settings
+    path = snapshot_path(settings)
+    snapshot = load_snapshot(state, refresh=True) if refresh else load_software_snapshot(path)
+    if snapshot is None:
+        raise click.ClickException(f"No software snapshot at {path} yet; --refresh reads one.")
+    age = snapshot_age(snapshot)
+    emit(
+        state,
+        {
+            "path": str(path),
+            "instance": snapshot.instance,
+            "taken_at": snapshot.taken_at,
+            "age_hours": round(age.total_seconds() / 3600, 1),
+            "fresh": age <= timedelta(hours=settings.snapshot_max_age_hours),
+            "installs": snapshot.install_count,
+            "software": len(snapshot.software),
+            "devices": len(snapshot.devices),
+        },
+    )
 
 
 @main.command("software-products")

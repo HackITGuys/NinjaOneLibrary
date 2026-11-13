@@ -10,6 +10,9 @@
 Every function returns pydantic models; `model.model_dump(mode="json")` gives a plain,
 JSON-ready dict. `brief(client, records)` turns a listing into short, aggregated rows
 (counts instead of device ids) and `render_table(rows)` prints them as aligned columns.
+
+The API can't filter software by name, so `software_snapshot(client)` reads the inventory
+once and saves it; `software_catalog` and `software_devices` then answer from it.
 """
 
 from importlib.metadata import PackageNotFoundError
@@ -39,9 +42,14 @@ from NinjaOne.models import (
     OsPatch,
     Role,
     ScanGroup,
+    SnapshotDevice,
+    SnapshotSoftware,
+    SoftwareCatalogEntry,
+    SoftwareDevice,
     SoftwareInstall,
     SoftwarePatch,
     SoftwareProduct,
+    SoftwareSnapshot,
     SoftwareSummary,
     Tag,
     normalise_kb,
@@ -62,6 +70,17 @@ from NinjaOne.security import (
     summarise_kbs,
     vulnerability_counts,
 )
+from NinjaOne.snapshot import (
+    load_fresh_software_snapshot,
+    load_software_snapshot,
+    refresh_software_snapshot,
+    save_software_snapshot,
+    snapshot_path,
+    software_catalog,
+    software_devices,
+    software_snapshot,
+    take_software_snapshot,
+)
 from NinjaOne.software import (
     attach_devices,
     device_software,
@@ -70,6 +89,7 @@ from NinjaOne.software import (
     list_software_products,
     parse_version,
     summarise_software,
+    text_equals,
     text_matches,
     version_matches,
 )
@@ -98,9 +118,14 @@ __all__ = [
     "ProgressHook",
     "Role",
     "ScanGroup",
+    "SnapshotDevice",
+    "SnapshotSoftware",
+    "SoftwareCatalogEntry",
+    "SoftwareDevice",
     "SoftwareInstall",
     "SoftwarePatch",
     "SoftwareProduct",
+    "SoftwareSnapshot",
     "SoftwareSummary",
     "Tag",
     "__version__",
@@ -127,16 +152,26 @@ __all__ = [
     "list_software",
     "list_software_products",
     "list_tags",
+    "load_fresh_software_snapshot",
+    "load_software_snapshot",
     "normalise_kb",
     "normalise_status",
     "os_patch_installs",
     "os_patches",
     "parse_version",
+    "refresh_software_snapshot",
     "render_table",
+    "save_software_snapshot",
+    "snapshot_path",
+    "software_catalog",
+    "software_devices",
     "software_patch_installs",
     "software_patches",
+    "software_snapshot",
     "summarise_kbs",
     "summarise_software",
+    "take_software_snapshot",
+    "text_equals",
     "text_matches",
     "version_matches",
     "vulnerability_counts",

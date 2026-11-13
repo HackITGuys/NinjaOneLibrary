@@ -1,7 +1,9 @@
 """Software inventory: who has what, from which vendor, at which version.
 
 Text filters (vendor, name) are case-insensitive substrings, or globs if the pattern has
-`*`, `?` or `[`. The version filter is one of:
+`*`, `?` or `[`. With exact=True they must equal the whole value instead (still
+case-insensitive; a pattern with glob characters is still a glob). The version filter is
+one of:
 
     "<24.09", ">=2.4,<2.4.62", "!=1.0"    PEP 440 specifier set (starts with < > = ! ~)
     "24.*", "1.2.?"                       glob on the raw version string
@@ -42,6 +44,19 @@ def text_matches(value: str | None, pattern: str | None) -> bool:
     if any(char in pattern for char in "*?["):
         return fnmatch.fnmatchcase(value, pattern)
     return pattern in value
+
+
+def text_equals(value: str | None, pattern: str | None) -> bool:
+    """Case-insensitive: a glob if the pattern has glob characters, else the whole value.
+    Surrounding whitespace is ignored."""
+    if not pattern:
+        return True
+    if value is None:
+        return False
+    value, pattern = value.strip().lower(), pattern.strip().lower()
+    if any(char in pattern for char in "*?["):
+        return fnmatch.fnmatchcase(value, pattern)
+    return value == pattern
 
 
 def parse_version(raw: str | None) -> Version | None:
@@ -91,15 +106,18 @@ def filter_software(
     name: str | None = None,
     version: str | None = None,
     include_system_components: bool = True,
+    exact: bool = False,
 ) -> list[SoftwareInstall]:
-    """Installs whose publisher matches `vendor`, name matches `name` and version matches `version`."""
+    """Installs whose publisher matches `vendor`, name matches `name` and version matches
+    `version`. exact=True: publisher and name must be the whole value, not a substring."""
     if version:
         version_specifier(version)  # fail on a bad specifier before looking at any install
+    matches = text_equals if exact else text_matches
     return [
         install
         for install in installs
-        if text_matches(install.publisher, vendor)
-        and text_matches(install.name, name)
+        if matches(install.publisher, vendor)
+        and matches(install.name, name)
         and version_matches(install.version, version)
         and (include_system_components or not install.is_system_component)
     ]
@@ -131,12 +149,15 @@ def list_software(
     installed_before: date | None = None,
     df: str | None = None,
     devices: dict[int, Device] | Iterable[Device] | None = None,
+    exact: bool = False,
 ) -> list[SoftwareInstall]:
     """Software installs across the fleet (or the devices `df` selects), filtered.
 
-    installed_after / installed_before are applied by the API, on the install date.
-    Pass `devices` (e.g. from list_devices) to get device and organisation names on each
-    install; nothing extra is fetched otherwise.
+    The API can't filter by publisher, name or version: those filters run here, so this
+    always reads every install in scope (200k+ on a large fleet). For repeated lookups use
+    a snapshot (NinjaOne.snapshot) instead. installed_after / installed_before are
+    applied by the API, on the install date. Pass `devices` (e.g. from list_devices) to
+    get device and organisation names on each install; nothing extra is fetched otherwise.
     """
     params: dict[str, str] = {}
     if df:
@@ -154,6 +175,7 @@ def list_software(
         name=name,
         version=version,
         include_system_components=include_system_components,
+        exact=exact,
     )
     return attach_devices(selected, devices) if devices is not None else selected
 

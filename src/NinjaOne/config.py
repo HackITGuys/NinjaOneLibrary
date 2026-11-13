@@ -11,8 +11,17 @@ read-only at the credential means a bug here cannot change a customer tenant.
 
 from __future__ import annotations
 
-from pydantic import SecretStr
+import os
+from pathlib import Path
+
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def default_cache_dir() -> Path:
+    """$XDG_CACHE_HOME/ninjaone, else ~/.cache/ninjaone: outside any repository."""
+    base = os.environ.get("XDG_CACHE_HOME")
+    return (Path(base) if base else Path.home() / ".cache") / "ninjaone"
 
 
 class NinjaOneSettings(BaseSettings):
@@ -36,6 +45,16 @@ class NinjaOneSettings(BaseSettings):
     max_attempts: int = 5
     page_size: int = 500
     """Records per page for paged endpoints."""
+
+    cache_dir: Path = Field(default_factory=default_cache_dir)
+    """Where the software inventory snapshot is kept."""
+    snapshot_max_age_hours: float = 24.0
+    """How old a software snapshot may get before a lookup reads the inventory again."""
+
+    @field_validator("cache_dir")
+    @classmethod
+    def _expand_home(cls, value: Path) -> Path:
+        return value.expanduser()  # NINJA_CACHE_DIR=~/... must not create a "~" directory
 
     @property
     def api_root(self) -> str:

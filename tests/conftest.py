@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -17,8 +18,9 @@ TOKEN_URL = BASE + "/ws/oauth/token"
 
 
 @pytest.fixture
-def settings() -> NinjaOneSettings:
-    # _env_file=None: never pick up a developer's real .env during tests.
+def settings(tmp_path: Path) -> NinjaOneSettings:
+    # _env_file=None: never pick up a developer's real .env during tests; and snapshots go
+    # to a temporary directory, never the real ~/.cache.
     return NinjaOneSettings(
         _env_file=None,
         base_url=BASE,
@@ -26,6 +28,7 @@ def settings() -> NinjaOneSettings:
         client_secret="test-secret",
         page_size=2,
         max_attempts=3,
+        cache_dir=tmp_path / "cache",
     )
 
 

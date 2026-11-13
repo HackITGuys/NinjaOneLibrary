@@ -80,6 +80,7 @@ print([device.model_dump(mode="json") for device in servers])
 | Organisations | `list_organizations`, `get_organization`, `find_organizations`, `list_locations` |
 | Devices | `list_devices`, `get_device`, `filter_devices`, `build_df`, `list_roles`, `list_tags` |
 | Software | `list_software`, `device_software`, `filter_software`, `summarise_software`, `attach_devices`, `list_software_products`, `version_matches` |
+| Software snapshot | `software_snapshot`, `software_catalog`, `software_devices`, `refresh_software_snapshot`, `load_software_snapshot`, `snapshot_path` |
 | Patches & KBs | `os_patches`, `os_patch_installs`, `device_os_patches`, `software_patches`, `software_patch_installs`, `device_software_patches`, `list_kbs`, `summarise_kbs` |
 | Vulnerabilities | `vulnerability_counts` (pass `devices=` for device names), `list_scan_groups`, `get_scan_group`, `find_endpoints` |
 | Views | `brief` (short, aggregated rows of any listing), `render_table` |
@@ -95,6 +96,24 @@ print(render_table(brief(client, list_kbs(client))))  # KB, name, ..., devices, 
 ```
 
 The library never prints. To follow a long listing, pass a callback: `NinjaOneClient(progress=lambda label, done, total: ...)` is called after every page with, for example, `("software", 34000, 120000)`. `total` is `None` for listings that don't say how big they are.
+
+### Software snapshot: "does it exist" and "where" without 200k reads
+
+NinjaOne's software query returns one record per install, and it can't filter by publisher, name or version. On a large fleet, every software question therefore reads 200k+ records. A snapshot reads them once, keeps one entry per distinct publisher, name and version along with the ids of the devices that have it, and saves it. After that, lookups are answered locally in milliseconds:
+
+```python
+from NinjaOne import software_catalog, software_devices, software_snapshot
+
+snapshot = software_snapshot(client)  # the saved one while under 24 h old, else read again
+software_catalog(snapshot, publisher="Igor Pavlov")  # what exists, with device counts
+software_devices(snapshot, publisher="Igor Pavlov", name="7-Zip 23.01 (x64)", version="23.01")
+```
+
+- **Matching is exact.** Publisher and name must equal the whole value (case-insensitive), so "Pavlov" doesn't match "Igor Pavlov". A pattern with glob characters, such as `7-Zip*`, is matched as a glob. The version can be exact, a glob (`24.*`) or a range (`<24.09`).
+- **Where it's kept:** `~/.cache/ninjaone/` (or `$XDG_CACHE_HOME/ninjaone`), one file per instance and client app. Set `NINJA_CACHE_DIR` to move it. The file names your devices and software, so it is readable by its owner only.
+- **When it's re-read:** once it is older than `NINJA_SNAPSHOT_MAX_AGE_HOURS` (default 24), or when you pass `refresh=True` or `--refresh`.
+
+`list_software(..., exact=True)` gives the same exact matching on a live read, which still reads every install in scope.
 
 ### What the API does and doesn't offer
 
@@ -115,6 +134,9 @@ ninjaone devices --org Contoso --class WINDOWS_SERVER --tag Production --os "Ser
 ninjaone device 1234
 ninjaone software --vendor "Igor Pavlov" --version "<24.09"
 ninjaone software --org Contoso --vendor Adobe --summary
+ninjaone software-catalog --publisher "Igor Pavlov" --brief    # what exists (from the snapshot)
+ninjaone software-devices --publisher "Igor Pavlov" --name "7-Zip 23.01 (x64)" --version 23.01 --brief
+ninjaone software-snapshot --refresh                         # re-read now, e.g. from a nightly job
 ninjaone software-products --vendor Mozilla
 ninjaone patches --org Contoso --kb KB5031356 --installed --since 2026-01-01
 ninjaone software-patches --vendor Google
@@ -136,6 +158,8 @@ ninjaone endpoints --match "vulnerab|cve"
 | devices | device | id, name, organisation, location, role, OS, state, tags, last contact |
 | software | product and version | publisher, name, version, devices |
 | software `--summary` | product | publisher, name, devices, installs, versions, newest |
+| software-catalog | publisher, name and version | publisher, name, version, devices |
+| software-devices | device and version | id, device, organisation, publisher, name, version |
 | software-products | product | id, vendor, product, installable, active |
 | patches | patch and status | KB, name, severity, status, devices |
 | software-patches | patch and status | vendor, title, version, impact, status, devices |

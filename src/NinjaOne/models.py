@@ -270,6 +270,61 @@ class SoftwareSummary(BaseModel):
     """version -> number of devices with it. "" is a version NinjaOne didn't report."""
 
 
+class SnapshotDevice(BaseModel):
+    """What a software snapshot keeps of a device: enough to name it and scope by organisation."""
+
+    id: int
+    name: str
+    organization_id: int | None = None
+    organization_name: str | None = None
+
+
+class SnapshotSoftware(BaseModel):
+    """One distinct (publisher, name, version) in a software snapshot, with the devices that have it."""
+
+    publisher: str | None
+    name: str
+    version: str | None
+    system_component: bool = False
+    """True if any install of it is flagged as a system component."""
+    device_ids: list[int] = Field(default_factory=list)
+
+
+class SoftwareSnapshot(BaseModel):
+    """The whole software inventory, read once and kept on disk (see NinjaOne.snapshot)."""
+
+    format: int
+    """Bumped when the layout changes; a snapshot in another format is read again."""
+    instance: str
+    """The base URL it was read from."""
+    taken_at: datetime
+    install_count: int
+    """How many install records the inventory had."""
+    devices: dict[int, SnapshotDevice] = Field(default_factory=dict)
+    software: list[SnapshotSoftware] = Field(default_factory=list)
+
+
+class SoftwareCatalogEntry(BaseModel):
+    """One distinct software (publisher, name, version) that exists, and on how many devices."""
+
+    publisher: str | None
+    name: str
+    version: str | None
+    device_count: int
+
+
+class SoftwareDevice(BaseModel):
+    """One device a software appears on."""
+
+    device_id: int
+    device_name: str | None = None
+    organization_id: int | None = None
+    organization_name: str | None = None
+    publisher: str | None
+    name: str
+    version: str | None
+
+
 class SoftwareProduct(ApiModel):
     """A product in NinjaOne's 3rd-party patching catalogue (/v2/software-products)."""
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import responses
 
@@ -93,3 +95,16 @@ def test_paginate_cursor_restarts_a_query_that_ends_early(
     api.get(API + "/queries/os-patches", json=envelope([{"d": 1}, {"d": 2}], "c2", 0, 3))
     api.get(API + "/queries/os-patches", json=envelope([{"d": 3}], None, 2, 3))
     assert [r["d"] for r in client.paginate_cursor("/queries/os-patches")] == [1, 2, 3]
+
+
+def test_paginate_cursor_transforms_records_as_they_arrive(
+    client: NinjaOneClient, api: responses.RequestsMock
+) -> None:
+    get(api, "/queries/software", envelope([{"d": 1, "x": 9}, {"d": 2}], "c1", 0, 3), {"pageSize": "2"})
+    get(api, "/queries/software", envelope([{"d": 3}], None, 2, 3), {"pageSize": "2", "cursor": "c1"})
+    assert list(client.paginate_cursor("/queries/software", transform=lambda r: r["d"])) == [1, 2, 3]
+
+
+def test_cache_dir_expands_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NINJA_CACHE_DIR", "~/ninja-cache")
+    assert NinjaOneSettings(_env_file=None).cache_dir == Path.home() / "ninja-cache"

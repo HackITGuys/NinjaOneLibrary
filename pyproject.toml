@@ -1,6 +1,6 @@
 [project]
 name = "ninjaone-library"
-version = "1.0.0"
+version = "1.1.0"
 description = "Read-only Python bindings for the NinjaOne Public API v2: organisations, devices, software, patches and KBs"
 readme = "README.md"
 requires-python = ">=3.12"

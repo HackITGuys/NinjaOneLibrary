@@ -13,6 +13,7 @@ from NinjaOne import (
     filter_software,
     list_software,
     summarise_software,
+    text_equals,
     text_matches,
     version_matches,
 )
@@ -31,6 +32,14 @@ def test_text_matches_substring_and_glob() -> None:
     assert not text_matches("7-Zip 23.01 (x64)", "zip*x86*")
     assert not text_matches(None, "zip")
     assert text_matches(None, None)
+
+
+def test_text_equals_is_whole_value_or_glob() -> None:
+    assert text_equals("7-Zip 23.01 (x64)", " 7-zip 23.01 (X64) ")
+    assert not text_equals("7-Zip 23.01 (x64)", "7-zip")  # a part is not enough
+    assert text_equals("7-Zip 23.01 (x64)", "7-zip*")
+    assert not text_equals(None, "7-zip")
+    assert text_equals(None, None)
 
 
 @pytest.mark.parametrize(
@@ -70,6 +79,9 @@ def test_filter_software() -> None:
     assert [i.device_id for i in filter_software(installs, vendor="pavlov", version="<24.09")] == [1]
     assert [i.device_id for i in filter_software(installs, name="7-zip")] == [1, 2]
     assert len(filter_software(installs, include_system_components=False)) == 3
+    assert filter_software(installs, vendor="pavlov", exact=True) == []
+    exact = filter_software(installs, vendor="igor pavlov", name="7-Zip 24.09 (x64)", exact=True)
+    assert [i.device_id for i in exact] == [2]
 
 
 def test_list_software_sends_dates_and_attaches_devices(

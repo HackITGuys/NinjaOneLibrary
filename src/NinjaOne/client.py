@@ -26,7 +26,7 @@ import logging
 import time
 from collections.abc import Callable, Iterator
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Self, TypeVar, overload
 
 import requests
 
@@ -45,6 +45,8 @@ MAX_RESTARTS = 3
 """/v2/queries/* occasionally ends a cursor early (an empty page mid-way, seen live on
 os-patches). The query is restarted this many times before giving up."""
 
+
+T = TypeVar("T")
 
 ProgressHook = Callable[[str, int, int | None], None]
 """progress(label, done, total): total is None when the size isn't known (`after` listings)."""
@@ -259,12 +261,32 @@ class NinjaOneClient:
 
         raise NinjaOneError(f"/v2{path} exceeded {MAX_PAGES} pages; refusing to continue.")
 
+    @overload
     def paginate_cursor(
         self,
         path: str,
         params: dict[str, Any] | None = None,
         page_size: int | None = None,
-    ) -> Iterator[dict[str, Any]]:
+    ) -> Iterator[dict[str, Any]]: ...
+
+    @overload
+    def paginate_cursor(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        page_size: int | None = None,
+        *,
+        transform: Callable[[dict[str, Any]], T],
+    ) -> Iterator[T]: ...
+
+    def paginate_cursor(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        page_size: int | None = None,
+        *,
+        transform: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> Iterator[Any]:
         """Every record from a /v2/queries/* endpoint ({cursor, results} envelope).
 
         Two server faults are handled, both seen live:
@@ -277,12 +299,13 @@ class NinjaOneClient:
           raised rather than partial data returned.
 
         Records are collected per attempt and only yielded once an attempt is complete,
-        so a restart never yields duplicates.
+        so a restart never yields duplicates. For a large query, pass `transform` to keep
+        only what you need of each record (e.g. a tuple) while the attempt is collected.
         """
         size = page_size or self.settings.page_size
         detail = ""
         for attempt in range(1, MAX_RESTARTS + 1):
-            records, detail = self._cursor_pass(path, params, size)
+            records, detail = self._cursor_pass(path, params, size, transform)
             if not detail:
                 yield from records
                 return
@@ -295,13 +318,17 @@ class NinjaOneClient:
         )
 
     def _cursor_pass(
-        self, path: str, params: dict[str, Any] | None, size: int
-    ) -> tuple[list[dict[str, Any]], str]:
+        self,
+        path: str,
+        params: dict[str, Any] | None,
+        size: int,
+        transform: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> tuple[list[Any], str]:
         """One pass over a cursor. Returns (records, "") if complete, else (partial, what went wrong)."""
         label = _label(path)
         cursor_name: str | None = None
         seen: set[str] = set()
-        records: list[dict[str, Any]] = []
+        records: list[Any] = []
         expected: int | None = None
         repeats = pages = 0
 
@@ -337,7 +364,7 @@ class NinjaOneClient:
                 seen.add(marker)
             repeats = 0
 
-            records.extend(results)
+            records.extend(results if transform is None else map(transform, results))
             pages += 1
             self.report(label, len(records), expected)
             if pages % PROGRESS_EVERY == 0:
