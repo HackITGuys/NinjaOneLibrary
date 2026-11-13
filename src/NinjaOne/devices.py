@@ -105,8 +105,9 @@ def filter_devices(
     ]
 
 
-class _Lookups:
-    """Organisation/role/location names, fetched only if `references` left gaps."""
+class NameLookups:
+    """Organisation, role and location names by id. Each listing is fetched on first use,
+    at most once: list_devices only needs them where `references` left gaps."""
 
     def __init__(self, client: NinjaOneClient) -> None:
         self.client = client
@@ -159,7 +160,7 @@ def list_devices(
     role, tags, os and state are then applied client-side - see filter_devices.
     """
     params = {"df": query} if (query := build_df(organization_id, location_id, node_class, df)) else None
-    lookups = _Lookups(client)
+    lookups = NameLookups(client)
     devices = [
         lookups.fill(Device.model_validate(raw)) for raw in client.paginate_after("/devices-detailed", params)
     ]
@@ -168,7 +169,7 @@ def list_devices(
 
 def get_device(client: NinjaOneClient, device_id: int) -> Device:
     """One device, with organisation, location and role names resolved."""
-    return _Lookups(client).fill(Device.model_validate(client.get_object(f"/device/{device_id}")))
+    return NameLookups(client).fill(Device.model_validate(client.get_object(f"/device/{device_id}")))
 
 
 def devices_by_id(devices: Iterable[Device]) -> dict[int, Device]:

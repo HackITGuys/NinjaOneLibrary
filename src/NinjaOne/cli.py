@@ -1,11 +1,13 @@
-"""`ninjaone` - the library's functions as JSON on stdout.
+"""`ninjaone` - the library's functions as JSON on stdout, or as tables with --brief.
 
     ninjaone organizations
-    ninjaone devices --org "Contoso" --os "Windows 11" --tag Production
-    ninjaone software --vendor "Igor Pavlov" --version "<24.09"
+    ninjaone devices --org "Contoso" --os "Windows 11" --tag Production --brief
+    ninjaone software --vendor "Igor Pavlov" --version "<24.09" --brief
     ninjaone kbs --org Contoso --include-installed --since 2026-01-01
 
-Logs and errors go to stderr, so stdout is always valid JSON (or nothing, on error).
+stdout is JSON unless a listing is given --brief, which prints aggregated rows as a
+table (--json prints those rows as JSON instead; -o always writes JSON). Logs, errors
+and the live progress line go to stderr.
 """
 
 from __future__ import annotations
@@ -14,16 +16,19 @@ import json
 import logging
 import re
 import sys
+import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TextIO, TypeVar
 
 import click
 import requests
 from pydantic_core import to_jsonable_python
 
+from NinjaOne import views
 from NinjaOne.client import NinjaOneClient, NinjaOneError
 from NinjaOne.config import NinjaOneSettings
 from NinjaOne.devices import build_df, get_device, list_devices, list_roles, list_tags
@@ -57,39 +62,118 @@ DEFAULT_SINCE_DAYS = 90
 can be over a million records."""
 
 
+def _records(count: int) -> str:
+    return f"{count:,} record" + ("" if count == 1 else "s")
+
+
+class StderrProgress:
+    """One live status line on stderr: "devices-detailed: 1,500 records", "software: 500/2,000".
+
+    Updates are throttled; the line is cleared before anything else is printed.
+    """
+
+    INTERVAL = 0.1
+
+    def __init__(self, stream: TextIO | None = None) -> None:
+        self.stream = stream if stream is not None else sys.stderr
+        self._shown = False
+        self._last = 0.0
+        self._label = ""
+        self._lock = threading.Lock()
+
+    def __call__(self, label: str, done: int, total: int | None) -> None:
+        now = time.monotonic()
+        with self._lock:
+            final = total is not None and done >= total
+            if not final and label == self._label and now - self._last < self.INTERVAL:
+                return
+            self._last, self._label = now, label
+            text = f"{label}: {done:,}/{total:,}" if total is not None else f"{label}: {_records(done)}"
+            self.stream.write("\r\033[K" + text + "...")
+            self.stream.flush()
+            self._shown = True
+
+    def clear(self) -> None:
+        with self._lock:
+            if self._shown:
+                self.stream.write("\r\033[K")
+                self.stream.flush()
+                self._shown = False
+
+
+class _ProgressAwareHandler(logging.StreamHandler):  # type: ignore[type-arg]
+    """Log lines clear the progress line first, so they don't print over it."""
+
+    def __init__(self, progress: StderrProgress | None) -> None:
+        super().__init__(sys.stderr)
+        self.progress = progress
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self.progress is not None:
+            self.progress.clear()
+        super().emit(record)
+
+
 @dataclass
 class State:
     env_file: Path | None = None
     output: Path | None = None
     compact: bool = False
+    json_output: bool = False
+    progress: StderrProgress | None = None
     _client: NinjaOneClient | None = field(default=None, repr=False)
 
     @property
     def client(self) -> NinjaOneClient:
         if self._client is None:
             settings = NinjaOneSettings(_env_file=self.env_file) if self.env_file else NinjaOneSettings()
-            self._client = NinjaOneClient(settings)
+            self._client = NinjaOneClient(settings, progress=self.progress)
         return self._client
 
 
 pass_state = click.make_pass_decorator(State)
 
 
-def emit(state: State, data: Any) -> None:
-    """Models, lists of models and dicts of them -> JSON on stdout (or --output)."""
-    text = json.dumps(
-        to_jsonable_python(data, by_alias=False),
-        indent=None if state.compact else 2,
-        ensure_ascii=False,
-        sort_keys=False,
-    )
+def emit(state: State, data: Any, *, table: bool = False, source: int | None = None) -> None:
+    """Models, lists of models and dicts of them -> JSON on stdout (or --output, always JSON).
+
+    table=True prints a list of rows as aligned columns instead, unless --json is given,
+    with a count on stderr; `source` is how many records the rows were made from.
+    """
+    payload = to_jsonable_python(data, by_alias=False)
+    if state.progress is not None:
+        state.progress.clear()
     if state.output:
+        text = json.dumps(payload, indent=None if state.compact else 2, ensure_ascii=False)
         state.output.parent.mkdir(parents=True, exist_ok=True)
         state.output.write_text(text + "\n", encoding="utf-8")
-        count = f"{len(data)} records" if isinstance(data, list | dict) else "1 record"
+        count = _records(len(data)) if isinstance(data, list | dict) else "1 record"
         click.echo(f"Wrote {count} to {state.output}", err=True)
+    elif table and not state.json_output and isinstance(payload, list):
+        if payload:
+            click.echo(views.render_table(payload))
+        rows = len(payload)
+        if source is None or source == rows:
+            click.echo(_records(rows), err=True)
+        else:
+            click.echo(f"{rows:,} row{'' if rows == 1 else 's'} from {_records(source)}", err=True)
     else:
-        click.echo(text)
+        click.echo(json.dumps(payload, indent=None if state.compact else 2, ensure_ascii=False))
+
+
+def show(state: State, brief: bool, records: Sequence[Any]) -> None:
+    """Full records as JSON, or with --brief the aggregated rows, as a table."""
+    if brief:
+        emit(state, views.brief(state.client, records), table=True, source=len(records))
+    else:
+        emit(state, records)
+
+
+brief_option = click.option(
+    "--brief",
+    is_flag=True,
+    help="Short, aggregated rows (counts instead of device ids) as a table. --json prints them as JSON.",
+)
 
 
 def _parse_since(ctx: click.Context, param: click.Parameter, value: str | None) -> date | None:
@@ -172,19 +256,41 @@ class Group(click.Group):
     help="Write JSON here instead of stdout.",
 )
 @click.option("--compact", is_flag=True, help="One-line JSON.")
-@click.option("-v", "--verbose", count=True, help="-v for progress, -vv for HTTP retries.")
+@click.option("--json", "json_output", is_flag=True, help="Print JSON on stdout, never tables.")
+@click.option(
+    "--progress/--no-progress",
+    default=None,
+    help="A live status line on stderr while fetching (default: on when stderr is a terminal).",
+)
+@click.option("-v", "--verbose", count=True, help="-v for more detail, -vv for HTTP retries.")
 @click.version_option(package_name="ninjaone-library")
 @click.pass_context
-def main(ctx: click.Context, env_file: Path | None, output: Path | None, compact: bool, verbose: int) -> None:
-    """Read-only NinjaOne API queries, printed as JSON."""
+def main(
+    ctx: click.Context,
+    env_file: Path | None,
+    output: Path | None,
+    compact: bool,
+    json_output: bool,
+    progress: bool | None,
+    verbose: int,
+) -> None:
+    """Read-only NinjaOne API queries, printed as JSON (or tables with --brief)."""
+    show_progress = sys.stderr.isatty() if progress is None else progress
+    reporter = StderrProgress() if show_progress else None
+    handler = _ProgressAwareHandler(reporter)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
     logging.basicConfig(
-        stream=sys.stderr,
-        level=max(logging.DEBUG, logging.WARNING - 10 * verbose),
-        format="%(levelname)s %(message)s",
+        level=max(logging.DEBUG, logging.WARNING - 10 * verbose), handlers=[handler], force=True
     )
     if not isinstance(ctx.obj, State):
         ctx.obj = State()
-    ctx.obj.env_file, ctx.obj.output, ctx.obj.compact = env_file, output, compact
+    state = ctx.obj
+    state.env_file, state.output, state.compact = env_file, output, compact
+    state.json_output, state.progress = json_output, reporter
+    if reporter is not None:
+        if state._client is not None:  # a client handed in (tests): report through it too
+            state._client.progress = reporter
+        ctx.call_on_close(reporter.clear)
 
 
 # -- base data ------------------------------------------------------------------
@@ -192,39 +298,43 @@ def main(ctx: click.Context, env_file: Path | None, output: Path | None, compact
 
 @main.command()
 @click.option("--name", help="Only organisations whose name contains this.")
+@brief_option
 @pass_state
-def organizations(state: State, name: str | None) -> None:
-    """List organisations."""
+def organizations(state: State, name: str | None, brief: bool) -> None:
+    """List organisations (--brief: id, name, approval mode)."""
     orgs = list_organizations(state.client)
     if name:
         orgs = [org for org in orgs if name.lower() in org.name.lower()]
-    emit(state, orgs)
+    show(state, brief, orgs)
 
 
 @main.command()
 @org_option
+@brief_option
 @pass_state
-def locations(state: State, org: str | None) -> None:
+def locations(state: State, org: str | None, brief: bool) -> None:
     """List locations: all, or those of the organisations --org matches."""
     ids = org_ids(state, org)
     if ids is None:
-        emit(state, list_locations(state.client))
+        show(state, brief, list_locations(state.client))
     else:
-        emit(state, [loc for org_id in ids for loc in list_locations(state.client, org_id)])
+        show(state, brief, [loc for org_id in ids for loc in list_locations(state.client, org_id)])
 
 
 @main.command()
+@brief_option
 @pass_state
-def roles(state: State) -> None:
+def roles(state: State, brief: bool) -> None:
     """List device roles."""
-    emit(state, list_roles(state.client))
+    show(state, brief, list_roles(state.client))
 
 
 @main.command()
+@brief_option
 @pass_state
-def tags(state: State) -> None:
-    """List asset tags."""
-    emit(state, list_tags(state.client))
+def tags(state: State, brief: bool) -> None:
+    """List asset tags (--brief: with how many devices carry each)."""
+    show(state, brief, list_tags(state.client))
 
 
 @main.command()
@@ -239,6 +349,7 @@ def tags(state: State) -> None:
 @click.option("--os", "os_name", help='OS name contains this, e.g. "Windows 11", "Server 2022", "Ubuntu".')
 @click.option("--state", "device_state", type=click.Choice(DEVICE_STATES), help="Operational state.")
 @df_option
+@brief_option
 @pass_state
 def devices(
     state: State,
@@ -251,10 +362,12 @@ def devices(
     os_name: str | None,
     device_state: str | None,
     df: str | None,
+    brief: bool,
 ) -> None:
     """List devices, filtered by organisation, location, class, role, tags, OS and state."""
-    emit(
+    show(
         state,
+        brief,
         list_devices(
             state.client,
             organization_id=org_ids(state, org),
@@ -290,6 +403,7 @@ def device(state: State, device_id: int) -> None:
 @click.option("--no-system", is_flag=True, help="Leave out system components.")
 @click.option("--summary", is_flag=True, help="One entry per product with device counts per version.")
 @df_option
+@brief_option
 @pass_state
 def software(
     state: State,
@@ -301,8 +415,13 @@ def software(
     no_system: bool,
     summary: bool,
     df: str | None,
+    brief: bool,
 ) -> None:
-    """Search installed software by vendor, name and version."""
+    """Search installed software by vendor, name and version.
+
+    --brief: one row per product and version with its device count (with --summary: one
+    row per product).
+    """
     if device_id is not None:
         installs = filter_software(
             device_software(state.client, device_id),
@@ -320,21 +439,22 @@ def software(
             version=version,
             include_system_components=not no_system,
             df=build_df(organization_ids=ids, df=df),
-            # Device names make the listing readable; a summary doesn't need them.
-            devices=None if summary else list_devices(state.client, organization_id=ids, df=df),
+            # Device names make the full listing readable; summaries and brief rows don't show them.
+            devices=None if summary or brief else list_devices(state.client, organization_id=ids, df=df),
         )
-    emit(state, summarise_software(installs) if summary else installs)
+    show(state, brief, summarise_software(installs) if summary else installs)
 
 
 @main.command("software-products")
 @click.option("--vendor", help="Vendor name contains this.")
+@brief_option
 @pass_state
-def software_products(state: State, vendor: str | None) -> None:
+def software_products(state: State, vendor: str | None, brief: bool) -> None:
     """List the 3rd-party products NinjaOne can patch."""
     products = list_software_products(state.client)
     if vendor:
         products = [p for p in products if vendor.lower() in (p.vendor_name or "").lower()]
-    emit(state, products)
+    show(state, brief, products)
 
 
 # -- security -------------------------------------------------------------------
@@ -350,6 +470,7 @@ def software_products(state: State, vendor: str | None) -> None:
 @click.option("--installed", is_flag=True, help="Read the install history instead of outstanding patches.")
 @since_option("With --installed: installs on or after this date, or 'all'.")
 @df_option
+@brief_option
 @pass_state
 def patches(
     state: State,
@@ -359,14 +480,19 @@ def patches(
     installed: bool,
     since: date | None,
     df: str | None,
+    brief: bool,
 ) -> None:
-    """List OS patch records (outstanding, or install history with --installed)."""
+    """List OS patch records (outstanding, or install history with --installed).
+
+    --brief: one row per patch and status with its device count.
+    """
     query = scope(state, org, df)
     kbs = split_ids(kb_values) or None
     if installed:
-        emit(state, os_patch_installs(state.client, df=query, status=status, installed_after=since, kbs=kbs))
+        records = os_patch_installs(state.client, df=query, status=status, installed_after=since, kbs=kbs)
     else:
-        emit(state, os_patches(state.client, df=query, status=status, kbs=kbs))
+        records = os_patches(state.client, df=query, status=status, kbs=kbs)
+    show(state, brief, records)
 
 
 @main.command("software-patches")
@@ -377,6 +503,7 @@ def patches(
 @click.option("--installed", is_flag=True, help="Read the install history instead of outstanding patches.")
 @since_option("With --installed: installs on or after this date, or 'all'.")
 @df_option
+@brief_option
 @pass_state
 def software_patches_command(
     state: State,
@@ -387,8 +514,9 @@ def software_patches_command(
     installed: bool,
     since: date | None,
     df: str | None,
+    brief: bool,
 ) -> None:
-    """List 3rd-party software patch records."""
+    """List 3rd-party software patch records (--brief: device counts per patch and status)."""
     query = scope(state, org, df)
     if installed:
         records = software_patch_installs(
@@ -396,7 +524,7 @@ def software_patches_command(
         )
     else:
         records = software_patches(state.client, df=query, status=status, vendor=vendor, title=title)
-    emit(state, records)
+    show(state, brief, records)
 
 
 @main.command()
@@ -405,6 +533,7 @@ def software_patches_command(
 @click.option("--include-installed", is_flag=True, help="Also read install history and count installs.")
 @since_option("With --include-installed: installs on or after this date, or 'all'.")
 @df_option
+@brief_option
 @pass_state
 def kbs(
     state: State,
@@ -413,10 +542,15 @@ def kbs(
     include_installed: bool,
     since: date | None,
     df: str | None,
+    brief: bool,
 ) -> None:
-    """List KBs with device counts per patch status - the input for KB -> CVE mapping."""
-    emit(
+    """List KBs with device counts per patch status - the input for KB -> CVE mapping.
+
+    --brief: one row per KB with a count column per status, no device ids.
+    """
+    show(
         state,
+        brief,
         list_kbs(
             state.client,
             df=scope(state, org, df),
@@ -431,19 +565,29 @@ def kbs(
 @org_option
 @click.option("--all", "show_all", is_flag=True, help="Include devices with no vulnerabilities.")
 @df_option
+@brief_option
 @pass_state
-def vulnerabilities(state: State, org: str | None, show_all: bool, df: str | None) -> None:
-    """Per-device vulnerability counts (critical/high/medium/low), worst first."""
-    emit(state, vulnerability_counts(state.client, df=scope(state, org, df), only_vulnerable=not show_all))
+def vulnerabilities(state: State, org: str | None, show_all: bool, df: str | None, brief: bool) -> None:
+    """Per-device vulnerability counts (critical/high/medium/low), worst first, with device names."""
+    query = scope(state, org, df)
+    counts = vulnerability_counts(
+        state.client,
+        df=query,
+        only_vulnerable=not show_all,
+        # device-health only has device ids; one device listing of the same scope names them.
+        devices=list_devices(state.client, df=query),
+    )
+    show(state, brief, counts)
 
 
 @main.command("scan-groups")
 @click.argument("scan_group_id", type=int, required=False)
+@brief_option
 @pass_state
-def scan_groups(state: State, scan_group_id: int | None) -> None:
+def scan_groups(state: State, scan_group_id: int | None, brief: bool) -> None:
     """List vulnerability scan groups, or show one."""
     if scan_group_id is None:
-        emit(state, list_scan_groups(state.client))
+        show(state, brief, list_scan_groups(state.client))
     else:
         emit(state, get_scan_group(state.client, scan_group_id))
 

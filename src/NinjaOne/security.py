@@ -27,7 +27,9 @@ from datetime import date, datetime
 from typing import Any
 
 from NinjaOne.client import NinjaOneClient
+from NinjaOne.devices import devices_by_id
 from NinjaOne.models import (
+    Device,
     DeviceVulnerabilityCounts,
     KbSummary,
     OsPatch,
@@ -201,7 +203,8 @@ def device_software_patches(
 # -- KBs --------------------------------------------------------------------------
 
 
-def _status_sort_key(status: str) -> tuple[int, str]:
+def status_sort_key(status: str) -> tuple[int, str]:
+    """Sort key: the STATUS_ORDER statuses in that order, then any others alphabetically."""
     return (STATUS_ORDER.index(status) if status in STATUS_ORDER else len(STATUS_ORDER), status)
 
 
@@ -252,7 +255,7 @@ def summarise_kbs(records: Iterable[OsPatch], kbs: Iterable[str] | None = None) 
     for kb in sorted(devices):
         by_status = {
             status: sorted(ids)
-            for status, ids in sorted(devices[kb].items(), key=lambda i: _status_sort_key(i[0]))
+            for status, ids in sorted(devices[kb].items(), key=lambda i: status_sort_key(i[0]))
         }
         info = details.get(kb, {})
         release_date: datetime | None = info.get("release_date")
@@ -299,11 +302,17 @@ def list_kbs(
 
 
 def vulnerability_counts(
-    client: NinjaOneClient, *, df: str | None = None, only_vulnerable: bool = True
+    client: NinjaOneClient,
+    *,
+    df: str | None = None,
+    only_vulnerable: bool = True,
+    devices: dict[int, Device] | Iterable[Device] | None = None,
 ) -> list[DeviceVulnerabilityCounts]:
     """Per-device critical/high/medium/low vulnerability counts (from device-health).
 
-    Sorted worst first. only_vulnerable drops devices with no vulnerabilities.
+    Sorted worst first. only_vulnerable drops devices with no vulnerabilities. device-health
+    only carries device ids: pass already-fetched `devices` to fill in device_name and
+    organization_name.
     """
     params = {"df": df} if df else None
     counts = [
@@ -312,6 +321,13 @@ def vulnerability_counts(
     ]
     if only_vulnerable:
         counts = [entry for entry in counts if entry.total > 0]
+    if devices is not None:
+        device_map = devices if isinstance(devices, dict) else devices_by_id(devices)
+        for entry in counts:
+            device = device_map.get(entry.device_id)
+            if device is not None:
+                entry.device_name = device.name
+                entry.organization_name = device.organization_name or None
     return sorted(
         counts,
         key=lambda entry: (

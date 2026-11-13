@@ -366,6 +366,10 @@ class DeviceVulnerabilityCounts(ApiModel):
     failed_os_patches_count: int | None = Field(default=None, alias="failedOSPatchesCount")
     offline: bool | None = None
 
+    device_name: str | None = None
+    organization_name: str | None = None
+    """Filled in only when the caller passes devices to vulnerability_counts."""
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def total(self) -> int:

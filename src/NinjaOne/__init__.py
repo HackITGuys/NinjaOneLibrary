@@ -8,13 +8,14 @@
         kbs = list_kbs(client, df="class in (WINDOWS_SERVER)")
 
 Every function returns pydantic models; `model.model_dump(mode="json")` gives a plain,
-JSON-ready dict.
+JSON-ready dict. `brief(client, records)` turns a listing into short, aggregated rows
+(counts instead of device ids) and `render_table(rows)` prints them as aligned columns.
 """
 
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _version
 
-from NinjaOne.client import NinjaOneAuthError, NinjaOneClient, NinjaOneError
+from NinjaOne.client import NinjaOneAuthError, NinjaOneClient, NinjaOneError, ProgressHook
 from NinjaOne.config import NinjaOneSettings
 from NinjaOne.devices import (
     build_df,
@@ -72,6 +73,7 @@ from NinjaOne.software import (
     text_matches,
     version_matches,
 )
+from NinjaOne.views import brief, render_table
 
 try:
     __version__ = _version("ninjaone-library")
@@ -93,6 +95,7 @@ __all__ = [
     "OperatingSystem",
     "Organization",
     "OsPatch",
+    "ProgressHook",
     "Role",
     "ScanGroup",
     "SoftwareInstall",
@@ -102,6 +105,7 @@ __all__ = [
     "Tag",
     "__version__",
     "attach_devices",
+    "brief",
     "build_df",
     "device_os_patches",
     "device_software",
@@ -128,6 +132,7 @@ __all__ = [
     "os_patch_installs",
     "os_patches",
     "parse_version",
+    "render_table",
     "software_patch_installs",
     "software_patches",
     "summarise_kbs",
