@@ -81,9 +81,20 @@ print([device.model_dump(mode="json") for device in servers])
 | Devices | `list_devices`, `get_device`, `filter_devices`, `build_df`, `list_roles`, `list_tags` |
 | Software | `list_software`, `device_software`, `filter_software`, `summarise_software`, `attach_devices`, `list_software_products`, `version_matches` |
 | Patches & KBs | `os_patches`, `os_patch_installs`, `device_os_patches`, `software_patches`, `software_patch_installs`, `device_software_patches`, `list_kbs`, `summarise_kbs` |
-| Vulnerabilities | `vulnerability_counts`, `list_scan_groups`, `get_scan_group`, `find_endpoints` |
+| Vulnerabilities | `vulnerability_counts` (pass `devices=` for device names), `list_scan_groups`, `get_scan_group`, `find_endpoints` |
+| Views | `brief` (short, aggregated rows of any listing), `render_table` |
 
 For anything not wrapped yet, `client.get("/path")`, `client.paginate_after(...)` and `client.paginate_cursor(...)` give you the raw JSON with authentication, retries and paging handled.
+
+`brief(client, records)` turns a listing into the plain-dict rows that the CLI's `--brief` prints, and `render_table(rows)` lays them out as aligned columns:
+
+```python
+from NinjaOne import brief, render_table
+
+print(render_table(brief(client, list_kbs(client))))  # KB, name, ..., devices, pending, failed, ...
+```
+
+The library never prints. To follow a long listing, pass a callback: `NinjaOneClient(progress=lambda label, done, total: ...)` is called after every page with, for example, `("software", 34000, 120000)`. `total` is `None` for listings that don't say how big they are.
 
 ### What the API does and doesn't offer
 
@@ -93,7 +104,7 @@ For anything not wrapped yet, `client.get("/path")`, `client.paginate_after(...)
 
 ## CLI
 
-Every command prints JSON on stdout; logs and errors go to stderr.
+Every command prints JSON on stdout, unless a listing is given `--brief` (see below). Logs, errors and the progress line go to stderr.
 
 ```sh
 ninjaone organizations
@@ -113,7 +124,38 @@ ninjaone scan-groups
 ninjaone endpoints --match "vulnerab|cve"
 ```
 
-`--org` takes an id or a name. An exact name wins; otherwise every organisation whose name contains the text is included. The global options are `--env-file`, `-o/--output FILE`, `--compact` and `-v`.
+`--org` takes an id or a name. An exact name wins; otherwise every organisation whose name contains the text is included.
+
+**`--brief`** prints a short table instead of JSON. Device-id lists become counts, and per-device records are grouped, so a fleet-wide query stays readable. On stderr, a footer says how many rows were printed and how many records they were made from, for example `3 rows from 5 records`.
+
+| Command | One `--brief` row per | Columns |
+|---|---|---|
+| organizations | organisation | id, name, approval mode |
+| locations | location | id, name, organisation, address |
+| roles / tags | role / tag | id, name, class, custom / id, name, devices, description |
+| devices | device | id, name, organisation, location, role, OS, state, tags, last contact |
+| software | product and version | publisher, name, version, devices |
+| software `--summary` | product | publisher, name, devices, installs, versions, newest |
+| software-products | product | id, vendor, product, installable, active |
+| patches | patch and status | KB, name, severity, status, devices |
+| software-patches | patch and status | vendor, title, version, impact, status, devices |
+| kbs | KB | KB, name, severity, released, devices, then a count for each status present (pending, approved, failed, rejected, installed) |
+| vulnerabilities | device, worst first | device, organisation, critical, high, medium, low, total, health |
+| scan-groups | scan group | id, name, vendor, status, records, uploaded |
+
+```sh
+ninjaone kbs --org Contoso --brief                      # counts per status, no device ids
+ninjaone software --vendor Mozilla --brief              # devices per product and version
+ninjaone --json kbs --brief | jq '.[] | select(.failed > 0)'
+```
+
+The global options are:
+- `--env-file`
+- `-o/--output FILE`: always writes JSON. With `--brief`, it writes the brief rows.
+- `--json`: prints JSON even with `--brief`.
+- `--compact`
+- `--progress/--no-progress`: a live status line on stderr showing which listing is being read and how far it has got, for example `devices-detailed: 1,500 records...` or `software: 34,000/120,000...`. It is on by default when stderr is a terminal and off when it is piped or logged.
+- `-v`: more detail; `-vv` also shows HTTP retries.
 
 ## Development
 

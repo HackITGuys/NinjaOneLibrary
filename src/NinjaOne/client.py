@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from types import TracebackType
 from typing import Any, Self
 
@@ -46,12 +46,21 @@ MAX_RESTARTS = 3
 os-patches). The query is restarted this many times before giving up."""
 
 
+ProgressHook = Callable[[str, int, int | None], None]
+"""progress(label, done, total): total is None when the size isn't known (`after` listings)."""
+
+
 class NinjaOneError(RuntimeError):
     pass
 
 
 class NinjaOneAuthError(NinjaOneError):
     pass
+
+
+def _label(path: str) -> str:
+    """/queries/os-patch-installs -> os-patch-installs: what a progress line calls a listing."""
+    return path.strip("/").removeprefix("queries/")
 
 
 class NinjaOneClient:
@@ -62,15 +71,21 @@ class NinjaOneClient:
 
         with NinjaOneClient() as client:          # NINJA_* from env / .env
             devices = list_devices(client, os="Windows 11")
+
+    Pass `progress` (label, done, total) to hear how far a paged listing has got.
     """
 
     def __init__(
         self,
         settings: NinjaOneSettings | None = None,
         session: requests.Session | None = None,
+        *,
+        progress: ProgressHook | None = None,
     ) -> None:
         self.settings = settings or NinjaOneSettings()
         self.session = session or requests.Session()
+        self.progress = progress
+        """Called as progress(label, done, total) after every page. None: silent."""
         self._token: str | None = None
         self._token_expires_at = 0.0
 
@@ -87,6 +102,11 @@ class NinjaOneClient:
 
     def close(self) -> None:
         self.session.close()
+
+    def report(self, label: str, done: int, total: int | None = None) -> None:
+        """Progress for whoever set `progress` (the CLI does; the library alone is silent)."""
+        if self.progress is not None:
+            self.progress(label, done, total)
 
     # -- auth -------------------------------------------------------------------
 
@@ -209,8 +229,10 @@ class NinjaOneClient:
         `after` carries the previous page's last id; the first empty page ends the listing.
         """
         size = page_size or self.settings.page_size
+        label = _label(path)
         after: Any = None
         seen: set[Any] = set()
+        count = 0
 
         for _ in range(MAX_PAGES):
             page_params: dict[str, Any] = {**(params or {}), "pageSize": size}
@@ -220,6 +242,8 @@ class NinjaOneClient:
             page = self.get_list(path, page_params)
             if not page:
                 return
+            count += len(page)
+            self.report(label, count)
             yield from page
 
             next_after = page[-1].get(id_field)
@@ -274,6 +298,7 @@ class NinjaOneClient:
         self, path: str, params: dict[str, Any] | None, size: int
     ) -> tuple[list[dict[str, Any]], str]:
         """One pass over a cursor. Returns (records, "") if complete, else (partial, what went wrong)."""
+        label = _label(path)
         cursor_name: str | None = None
         seen: set[str] = set()
         records: list[dict[str, Any]] = []
@@ -314,6 +339,7 @@ class NinjaOneClient:
 
             records.extend(results)
             pages += 1
+            self.report(label, len(records), expected)
             if pages % PROGRESS_EVERY == 0:
                 log.info(
                     "/v2%s: %s of %s records", path, len(records), expected if expected is not None else "?"

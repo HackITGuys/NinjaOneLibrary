@@ -166,6 +166,13 @@ def device_software(client: NinjaOneClient, device_id: int) -> list[SoftwareInst
     ]
 
 
+def version_key(raw: str | None) -> tuple[bool, Version | str, str]:
+    """Sort key for raw version strings. With reverse=True: parseable versions first,
+    newest first; the rest after them, by text."""
+    parsed = parse_version(raw)
+    return (parsed is not None, parsed or "", raw or "")
+
+
 def summarise_software(installs: Iterable[SoftwareInstall]) -> list[SoftwareSummary]:
     """One entry per (publisher, name): device and install counts, and devices per version.
 
@@ -180,10 +187,6 @@ def summarise_software(installs: Iterable[SoftwareInstall]) -> list[SoftwareSumm
         installs_per[key] += 1
         versions[key][install.version or ""].add(install.device_id)
 
-    def version_order(item: tuple[str, set[int]]) -> tuple[bool, Version | str, str]:
-        parsed = parse_version(item[0])
-        return (parsed is not None, parsed or "", item[0])
-
     summaries = [
         SoftwareSummary(
             publisher=publisher,
@@ -193,7 +196,7 @@ def summarise_software(installs: Iterable[SoftwareInstall]) -> list[SoftwareSumm
             versions={
                 version: len(ids)
                 for version, ids in sorted(
-                    versions[(publisher, name)].items(), key=version_order, reverse=True
+                    versions[(publisher, name)].items(), key=lambda item: version_key(item[0]), reverse=True
                 )
             },
         )

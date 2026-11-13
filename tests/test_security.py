@@ -5,6 +5,7 @@ from datetime import date
 import responses
 
 from NinjaOne import (
+    Device,
     NinjaOneClient,
     OsPatch,
     find_endpoints,
@@ -16,7 +17,7 @@ from NinjaOne import (
     summarise_kbs,
     vulnerability_counts,
 )
-from tests.conftest import BASE, get, get_query
+from tests.conftest import BASE, get, get_query, raw_device
 
 
 def patch(device_id: int, kb: str | None, status: str, at: float = 1767225600.0) -> OsPatch:
@@ -96,6 +97,18 @@ def test_vulnerability_counts(client: NinjaOneClient, api: responses.RequestsMoc
     worst_first = vulnerability_counts(client)
     assert [(c.device_id, c.total) for c in worst_first] == [(2, 1), (1, 3)]
     assert worst_first[0].pending_os_patches_count == 4
+    assert worst_first[0].device_name is None  # no devices passed: ids only
+
+
+def test_vulnerability_counts_names_devices(client: NinjaOneClient, api: responses.RequestsMock) -> None:
+    rows = [{"deviceId": 1, "highVulnerabilityCount": 2}, {"deviceId": 9, "lowVulnerabilityCount": 1}]
+    get_query(api, "/queries/device-health", rows)
+    devices = [Device.model_validate(raw_device(1, name="SRV-SQL01"))]
+    counts = vulnerability_counts(client, devices=devices)
+    assert [(c.device_id, c.device_name, c.organization_name) for c in counts] == [
+        (1, "SRV-SQL01", "Contoso"),
+        (9, None, None),  # not among the devices passed
+    ]
 
 
 def test_scan_groups(client: NinjaOneClient, api: responses.RequestsMock) -> None:
